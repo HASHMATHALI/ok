@@ -1,15 +1,17 @@
 #!/bin/bash
 # =============================================================================
 # Vellum RAG — Automated AWS EC2 Deployment Script
-# Target: ubuntu@13.203.216.62 (i-007499612bf6ed5d5)
+# Usage: EC2_HOST=<public-ip> EC2_KEY=~/.ssh/<key>.pem ./deploy.sh
+# The SSH key must live OUTSIDE this repository. A .env file with the required
+# secrets (see .env.example) must exist next to this script; it is synced to the server.
 # =============================================================================
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-EC2_HOST="13.203.216.62"
-EC2_USER="ubuntu"
-EC2_KEY="./rag-key.pem"
+EC2_HOST="${EC2_HOST:?Set EC2_HOST to the server public IP or hostname}"
+EC2_USER="${EC2_USER:-ubuntu}"
+EC2_KEY="${EC2_KEY:?Set EC2_KEY to the path of your SSH private key (keep it outside the repo)}"
 REMOTE_DIR="/home/ubuntu/rag"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -27,14 +29,17 @@ error()  { echo -e "${RED}[✗] $*${NC}"; exit 1; }
 # ── Validate SSH key ───────────────────────────────────────────────────────────
 log "Step 1/8: Validating SSH key..."
 if [ ! -f "$EC2_KEY" ]; then
-    error "SSH key not found at $EC2_KEY. Run this script from the project root."
+    error "SSH key not found at $EC2_KEY."
+fi
+if [ ! -f "$LOCAL_DIR/.env" ]; then
+    error "Missing $LOCAL_DIR/.env. Copy .env.example to .env and fill in the secrets first."
 fi
 chmod 400 "$EC2_KEY"
 ok "SSH key validated."
 
 # ── Test SSH connectivity ──────────────────────────────────────────────────────
 log "Step 2/8: Testing SSH connectivity to $EC2_HOST..."
-if ! ssh -i "$EC2_KEY" -o ConnectTimeout=15 -o StrictHostKeyChecking=no \
+if ! ssh -i "$EC2_KEY" -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
     "$EC2_USER@$EC2_HOST" "echo 'SSH OK'" 2>/dev/null; then
     error "Cannot connect to EC2. Check security group (port 22) and key pair."
 fi
@@ -42,7 +47,7 @@ ok "SSH connection successful."
 
 # ── Bootstrap EC2: swap + docker ──────────────────────────────────────────────
 log "Step 3/8: Bootstrapping EC2 (swap, Docker, Docker Compose)..."
-ssh -i "$EC2_KEY" -o StrictHostKeyChecking=no "$EC2_USER@$EC2_HOST" << 'REMOTE_BOOTSTRAP'
+ssh -i "$EC2_KEY" -o StrictHostKeyChecking=accept-new "$EC2_USER@$EC2_HOST" << 'REMOTE_BOOTSTRAP'
 set -e
 
 # ── Configure 4GB Swap (required for docker build on t3.micro) ──────────────
@@ -89,7 +94,7 @@ ok "EC2 bootstrap complete."
 
 # ── Sync project files ────────────────────────────────────────────────────────
 log "Step 4/8: Syncing project files to EC2..."
-ssh -i "$EC2_KEY" -o StrictHostKeyChecking=no "$EC2_USER@$EC2_HOST" "mkdir -p $REMOTE_DIR"
+ssh -i "$EC2_KEY" -o StrictHostKeyChecking=accept-new "$EC2_USER@$EC2_HOST" "mkdir -p $REMOTE_DIR"
 rsync -avz --progress \
     --exclude='.git' \
     --exclude='node_modules' \
@@ -98,13 +103,13 @@ rsync -avz --progress \
     --exclude='.next' \
     --exclude='dist' \
     --exclude='*.pem' \
-    -e "ssh -i $EC2_KEY -o StrictHostKeyChecking=no" \
+    -e "ssh -i $EC2_KEY -o StrictHostKeyChecking=accept-new" \
     "$LOCAL_DIR/" "$EC2_USER@$EC2_HOST:$REMOTE_DIR/"
 ok "Files synced to $REMOTE_DIR."
 
 # ── Copy SSH key permissions & build + start services ────────────────────────
 log "Step 5/8: Building and starting Docker services..."
-ssh -i "$EC2_KEY" -o StrictHostKeyChecking=no "$EC2_USER@$EC2_HOST" << REMOTE_DEPLOY
+ssh -i "$EC2_KEY" -o StrictHostKeyChecking=accept-new "$EC2_USER@$EC2_HOST" << REMOTE_DEPLOY
 set -e
 cd "$REMOTE_DIR"
 
@@ -124,7 +129,7 @@ ok "Docker services started."
 
 # ── Health check loop ─────────────────────────────────────────────────────────
 log "Step 6/8: Verifying container health..."
-ssh -i "$EC2_KEY" -o StrictHostKeyChecking=no "$EC2_USER@$EC2_HOST" << 'REMOTE_HEALTH'
+ssh -i "$EC2_KEY" -o StrictHostKeyChecking=accept-new "$EC2_USER@$EC2_HOST" << 'REMOTE_HEALTH'
 set -e
 cd /home/ubuntu/rag
 
@@ -215,13 +220,10 @@ echo ""
 echo "  🌐 Frontend:     http://$EC2_HOST"
 echo "  🔌 API:          http://$EC2_HOST/api/"
 echo "  📚 Swagger:      http://$EC2_HOST/docs"
-echo "  🐘 PostgreSQL:   $EC2_HOST:5433"
-echo "  🔴 Redis:        $EC2_HOST:6380"
-echo "  🔍 Qdrant:       http://$EC2_HOST:6333"
+echo "  🐘 PostgreSQL / Redis / Qdrant are bound to localhost on the server (use an SSH tunnel)"
 echo ""
-echo "  👤 Admin Login:  admin@vellum.ai / admin123"
-echo "  👤 Guest Login:  guest@vellum.ai / guest123"
+echo "  👤 Admin Login:  the ADMIN_EMAIL / ADMIN_PASSWORD from your .env"
 echo ""
-echo "  📋 SSH:          ssh -i rag-key.pem ubuntu@$EC2_HOST"
-echo "  📋 Logs:         ssh -i rag-key.pem ubuntu@$EC2_HOST 'cd /home/ubuntu/rag && docker compose logs -f'"
+echo "  📋 SSH:          ssh -i $EC2_KEY $EC2_USER@$EC2_HOST"
+echo "  📋 Logs:         ssh -i $EC2_KEY $EC2_USER@$EC2_HOST 'cd /home/ubuntu/rag && docker compose logs -f'"
 echo ""
